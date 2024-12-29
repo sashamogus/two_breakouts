@@ -1,5 +1,7 @@
 package two_breakouts
 
+font_load := #load("fonts/PressStart2P-Regular.ttf")
+
 Sprite_Tag :: enum {
     Ball_Blue,
     Ball_Orange,

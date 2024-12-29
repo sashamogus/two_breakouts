@@ -10,8 +10,8 @@ import rl "vendor:raylib"
 RENDER_WIDTH  :: 568
 RENDER_HEIGHT :: 320
 
-WINDOW_WIDTH :: RENDER_WIDTH*2
-WINDOW_HEIGHT :: RENDER_HEIGHT*2
+WINDOW_WIDTH :: RENDER_WIDTH
+WINDOW_HEIGHT :: RENDER_HEIGHT
 
 
 CL_ORANGE :: rl.Color { 227, 81, 0, 255 }
@@ -31,7 +31,6 @@ Root_State :: enum {
     Title,
     Game,
 }
-
 
 Input :: struct {
     // Menu Input
@@ -62,6 +61,12 @@ Ball :: struct {
     dead_timer: int,
 }
 
+Block :: struct {
+    used: bool,
+    side: int,
+    pos, size: [2]int,
+}
+
 Game_State :: enum {
     Level_Start,
     Playing,
@@ -78,6 +83,8 @@ Game :: struct {
     paddle_length: int,
 
     balls: [dynamic]Ball,
+
+    board: [2][BOARD_HEIGHT][BOARD_WIDTH]Block
 }
 
 
@@ -204,6 +211,26 @@ game_init :: proc(game: ^Game) {
     game.paddle_length = PADDLE_SIZE
 }
 
+game_load_level :: proc(game: ^Game, level_strings: Level_Strings) {
+    game.board = {}
+    for side, s in level_strings {
+        for row, i in side {
+            for c, j in row {
+                if c == '#' {
+                    b := Block {
+                        used = true,
+                        side = s,
+                        pos = { j, i },
+                        size = { 2, 1 },
+                    }
+                    game.board[s][i][j] = b
+                    game.board[s][i][j + 1] = b
+                }
+            }
+        }
+    }
+}
+
 draw_paddle :: proc(pos: [2]f32, frame, length: int, orange: bool) {
     pos := [2]f32 { math.floor(pos.x), math.floor(pos.y) }
     src_l := rl.Rectangle {
@@ -297,10 +324,41 @@ bounce_rect :: proc(pos, vel: ^[2]f32, rect: rl.Rectangle) -> bool {
         } else if c.y >= rect.y && c.y <= rect.y + rect.height {
             vel.x = -vel.x
         } else {
+            //vel.y = -vel.y
         }
         return true
     }
     return false
+}
+
+get_block :: proc(pos: [2]f32, board: [2][BOARD_HEIGHT][BOARD_WIDTH]Block) -> Block {
+    pos := pos - { f32((RENDER_WIDTH - BOARD_WIDTH*TILE_SIZE) / 2), 0 }
+    y := int(pos.y / 8)
+    x := int(pos.x / 8)
+    s := y / BOARD_HEIGHT
+    y = y %% BOARD_HEIGHT
+
+    if s < 0 || s >= 2 {
+        return {}
+    }
+    if x < 0 || x >= BOARD_WIDTH {
+        return {}
+    }
+    if y < 0 || y >= BOARD_HEIGHT {
+        return {}
+    }
+
+    return board[s][y][x]
+}
+
+delete_block :: proc(block: Block, board: ^[2][BOARD_HEIGHT][BOARD_WIDTH]Block) {
+    for iy in 0..<block.size.y {
+        for ix in 0..<block.size.x {
+            x := block.pos.x + ix
+            y := block.pos.y + iy
+            board[block.side][y][x] = {}
+        }
+    }
 }
 
 game_update :: proc(game: ^Game, input: Input) {
@@ -360,6 +418,8 @@ game_update :: proc(game: ^Game, input: Input) {
         ball_spawn(&game.balls, true)
     }
 
+    
+
     #reverse for &ball, i in game.balls {
         if ball.held {
             ball.pos.x = game.paddle_pos - 4
@@ -378,6 +438,7 @@ game_update :: proc(game: ^Game, input: Input) {
             continue
         }
 
+        // Collision with walls
         if ball.vel.x < 0 {
             if ball.pos.x < board_l {
                 ball.vel.x = -ball.vel.x
@@ -401,6 +462,7 @@ game_update :: proc(game: ^Game, input: Input) {
             }
         }
 
+        // Collision with paddles
         rect_ball := rl.Rectangle {
             ball.pos.x,
             ball.pos.y,
@@ -473,8 +535,33 @@ game_update :: proc(game: ^Game, input: Input) {
             }
         }
 
+        // Collision with blocks
+        for x in 0..<2 {
+            for y in 0..<2 {
+                p := ball.pos + { f32(x*8), f32(y*8) }
+                block := get_block(p, game.board)
+                if !block.used { continue }
+
+                rect := rl.Rectangle {
+                    board_l + f32(block.pos.x*8),
+                    f32(block.side*RENDER_HEIGHT / 2 + block.pos.y*8),
+                    f32(block.size.x*8),
+                    f32(block.size.y*8),
+                }
+                if bounce_rect(&ball.pos, &ball.vel, rect) {
+                    delete_block(block, &game.board)
+
+                    // SOUND
+                    // SCORE
+                }
+            }
+        }
+
+
+        // Move ball :)
         ball.pos += ball.vel
 
+        // Die lol
         for zone in death_zones {
             if rl.CheckCollisionRecs(rect_ball, zone) {
                 ball.dead = true
@@ -577,6 +664,20 @@ game_update :: proc(game: ^Game, input: Input) {
         }
     }
 
+    // Board rendering
+    for side, s in game.board {
+        texture := s == 0 ? sprites[.Block_Blue] : sprites[.Block_Orange]
+        side_y := f32(s*(RENDER_HEIGHT / 2))
+        for row, y in side {
+            for b, x in row {
+                if b.used && b.pos == { x, y } {
+                    v := [2]f32 { board_l + f32(x*TILE_SIZE), side_y + f32(y*TILE_SIZE) }
+                    rl.DrawTextureV(texture, v, rl.WHITE)
+                }
+            }
+        }
+    }
+
     // Paddle rendering
     paddle_y := paddle_get_y(false)
     draw_paddle({ game.paddle_pos, paddle_y      }, int(game.paddle_anim*3), game.paddle_length, false)
@@ -594,10 +695,13 @@ game_update :: proc(game: ^Game, input: Input) {
         rl.DrawTextureV(texture, ball.pos, rl.WHITE)
     }
 
+    // Death zone rendering
     rl.DrawRectangleRec(death_zones[0], rl.RED)
     rl.DrawRectangleRec(death_zones[1], rl.YELLOW)
+    
 }
 
+font: rl.Font
 sprites: [Sprite_Tag]rl.Texture
 
 main :: proc() {
@@ -608,17 +712,23 @@ main :: proc() {
     windowed_width  := i32(WINDOW_WIDTH)
     windowed_height := i32(WINDOW_HEIGHT)
 
+    // Create render texture
     render_texture := rl.LoadRenderTexture(RENDER_WIDTH, RENDER_HEIGHT)
     if !rl.IsRenderTextureValid(render_texture) {
         fmt.eprint("Render texture failed to initialize!!")
         os.exit(-1)
     }
 
+    // Load font
+    font = rl.LoadFontFromMemory(".ttf", &font_load[0], i32(len(font_load)), 8, nil, 0)
+
+    // Load sprites
     for tag in Sprite_Tag {
         image := rl.LoadImageFromMemory(".png", &sprites_load[tag][0], i32(len(sprites_load[tag])))
         sprites[tag] = rl.LoadTextureFromImage(image)
         rl.UnloadImage(image)
     }
+
 
     root_state := Root_State.Game
 
@@ -626,8 +736,10 @@ main :: proc() {
     game: Game
 
     game_init(&game)
+    game_load_level(&game, levels[0])
 
     for !rl.WindowShouldClose() {
+        // Handle Alt + Enter
         if rl.IsKeyDown(.LEFT_ALT) && rl.IsKeyPressed(.ENTER) {
             if !rl.IsWindowFullscreen() {
                 windowed_width = rl.GetScreenWidth()
@@ -670,7 +782,6 @@ main :: proc() {
             }
         }
 
-
         poll_input(&input)
 
         switch root_state {
@@ -704,5 +815,7 @@ main :: proc() {
         }
 
         rl.EndDrawing()
+
+        free_all(context.temp_allocator)
     }
 }
