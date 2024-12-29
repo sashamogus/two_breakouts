@@ -3,6 +3,7 @@ package two_breakouts
 import "core:os"
 import "core:fmt"
 import "core:math"
+import "core:math/linalg"
 import rl "vendor:raylib"
 
 
@@ -21,6 +22,10 @@ ANALOG_RELEASE :: 0.4
 
 PADDLE_SIZE :: 40
 PADDLE_SIZE_LONG :: 56
+
+TILE_SIZE :: 8
+BOARD_WIDTH :: 20
+BOARD_HEIGHT :: 20
 
 Root_State :: enum {
     Title,
@@ -50,6 +55,11 @@ Ball_Color :: enum {
 Ball :: struct {
     color: Ball_Color,
     pos, vel: [2]f32,
+    held: bool,
+    held_timer: int,
+
+    dead: bool,
+    dead_timer: int,
 }
 
 Game_State :: enum {
@@ -61,12 +71,15 @@ Game_State :: enum {
 Game :: struct {
     frame_count: int,
     state: Game_State,
+    state_timer: int,
+
     paddle_pos: f32,
     paddle_anim: f32,
     paddle_length: int,
 
     balls: [dynamic]Ball,
 }
+
 
 poll_input :: proc(input: ^Input) {
     input^ = { analog_down = input.analog_down }
@@ -186,7 +199,7 @@ poll_input :: proc(input: ^Input) {
 game_init :: proc(game: ^Game) {
     game^ = {}
     game.state = .Level_Start
-    game.paddle_pos = RENDER_WIDTH / 2 - 20
+    game.paddle_pos = RENDER_WIDTH / 2
     game.paddle_anim = 0
     game.paddle_length = PADDLE_SIZE
 }
@@ -250,6 +263,46 @@ draw_paddle :: proc(pos: [2]f32, frame, length: int, orange: bool) {
     }
 }
 
+paddle_get_y :: proc(orange: bool) -> f32 {
+    paddle_y := f32(RENDER_HEIGHT / 2) - 16
+    if orange {
+        paddle_y += 16
+    }
+    return paddle_y
+}
+
+ball_spawn :: proc(balls: ^[dynamic]Ball, orange: bool) {
+    ball := Ball {
+        color = orange ? .Orange : .Blue,
+        pos = orange ? paddle_get_y(orange) + 16 : paddle_get_y(orange) - 8,
+        vel = orange ? { 1, 1 } : { -1, -1 },
+
+        held = true,
+        held_timer = 180,
+    }
+    append(balls, ball)
+}
+
+bounce_rect :: proc(pos, vel: ^[2]f32, rect: rl.Rectangle) -> bool {
+    brec := rl.Rectangle {
+        pos.x,
+        pos.y,
+        8,
+        8,
+    }
+    if rl.CheckCollisionRecs(brec, rect) {
+        c := pos^ + { 4, 4 }
+        if c.x >= rect.x && c.x <= rect.x + rect.width {
+            vel.y = -vel.y
+        } else if c.y >= rect.y && c.y <= rect.y + rect.height {
+            vel.x = -vel.x
+        } else {
+        }
+        return true
+    }
+    return false
+}
+
 game_update :: proc(game: ^Game, input: Input) {
     game.frame_count += 1
 
@@ -259,6 +312,10 @@ game_update :: proc(game: ^Game, input: Input) {
     }
     game.paddle_pos += f32(input.move)*move_speed
 
+    board_l := f32((RENDER_WIDTH - BOARD_WIDTH*TILE_SIZE) / 2)
+    board_r := f32(board_l + BOARD_WIDTH*TILE_SIZE)
+    game.paddle_pos = clamp(game.paddle_pos, board_l + f32(game.paddle_length / 2), board_r - f32(game.paddle_length / 2))
+
     if input.open {
         game.paddle_anim += 0.05
     } else {
@@ -266,9 +323,279 @@ game_update :: proc(game: ^Game, input: Input) {
     }
     game.paddle_anim = clamp(game.paddle_anim, 0, 1)
 
-    paddle_y := f32(RENDER_HEIGHT / 2) - 16
+    death_zones: [2]rl.Rectangle
+    if game.paddle_anim < 0.5 {
+        death_zones[0] = rl.Rectangle {
+            board_l,
+            RENDER_HEIGHT / 2 - 8,
+            game.paddle_pos - board_l,
+            16,
+        }
+        death_zones[1] = rl.Rectangle {
+            game.paddle_pos,
+            RENDER_HEIGHT / 2 - 8,
+            board_r - game.paddle_pos,
+            16,
+        }
+    } else {
+        death_zones[0] = rl.Rectangle {
+            board_l,
+            RENDER_HEIGHT / 2 - 8,
+            game.paddle_pos - f32(game.paddle_length / 2) - board_l,
+            16,
+        }
+        x := game.paddle_pos + f32(game.paddle_length / 2)
+        death_zones[1] = rl.Rectangle {
+            x,
+            RENDER_HEIGHT / 2 - 8,
+            board_r - x,
+            16,
+        }
+    }
+
+    if rl.IsKeyPressed(.ENTER) {
+        ball_spawn(&game.balls, false)
+    }
+    if rl.IsKeyPressed(.BACKSPACE) {
+        ball_spawn(&game.balls, true)
+    }
+
+    #reverse for &ball, i in game.balls {
+        if ball.held {
+            ball.pos.x = game.paddle_pos - 4
+            ball.held_timer -= 1
+            if ball.held_timer <= 0 {
+                ball.held = false
+            }
+            continue
+        }
+
+        if ball.dead {
+            ball.dead_timer -= 1
+            if ball.dead_timer <= 0 {
+                unordered_remove(&game.balls, i)
+            }
+            continue
+        }
+
+        if ball.vel.x < 0 {
+            if ball.pos.x < board_l {
+                ball.vel.x = -ball.vel.x
+                // SOUND
+            }
+        } else {
+            if ball.pos.x > board_r - 8 {
+                ball.vel.x = -ball.vel.x
+                // SOUND
+            }
+        }
+        if ball.vel.y < 0 {
+            if ball.pos.y < 8 {
+                ball.vel.y = -ball.vel.y
+                // SOUND
+            }
+        } else {
+            if ball.pos.y > RENDER_HEIGHT - 16 {
+                ball.vel.y = -ball.vel.y
+                // SOUND
+            }
+        }
+
+        rect_ball := rl.Rectangle {
+            ball.pos.x,
+            ball.pos.y,
+            8,
+            8,
+        }
+        if game.paddle_anim < 0.5 {
+            if ball.vel.y > 0 {
+                rect_bl := rl.Rectangle {
+                    game.paddle_pos - f32(game.paddle_length / 2),
+                    paddle_get_y(false),
+                    f32(game.paddle_length),
+                    8,
+                }
+                if rl.CheckCollisionRecs(rect_bl, rect_ball) {
+                    a := linalg.atan2(ball.vel.y, ball.vel.x)
+                    s := linalg.length(ball.vel)
+                    min_a := a - 1.0
+                    max_a := a + 1.0
+                    t := 1.0 - math.saturate((ball.pos.x + 4 - rect_bl.x) / rect_bl.width)
+                    new_a := clamp(math.lerp(min_a, max_a, t), 0.3, math.PI - 0.3)
+
+                    ball.vel = { math.cos(new_a), math.sin(new_a) } * s
+                    ball.vel.y = -ball.vel.y
+                    // SOUND
+                }
+            } else {
+                rect_or := rl.Rectangle {
+                    game.paddle_pos - f32(game.paddle_length / 2),
+                    paddle_get_y(true) + 8,
+                    f32(game.paddle_length),
+                    8,
+                }
+                if rl.CheckCollisionRecs(rect_or, rect_ball) {
+                    ball.vel.y = -ball.vel.y
+                    a := linalg.atan2(ball.vel.y, ball.vel.x)
+                    s := linalg.length(ball.vel)
+                    min_a := a - 1.0
+                    max_a := a + 1.0
+                    t := 1.0 - math.saturate((ball.pos.x + 4 - rect_or.x) / rect_or.width)
+                    new_a := clamp(math.lerp(min_a, max_a, t), 0.3, math.PI - 0.3)
+
+                    ball.vel = { math.cos(new_a), math.sin(new_a) } * s
+                    // SOUND
+                }
+            }
+        } else {
+            if ball.vel.x < 0 {
+                rect_l := rl.Rectangle {
+                    game.paddle_pos - f32(game.paddle_length / 2),
+                    paddle_get_y(false),
+                    8,
+                    32,
+                }
+                if rl.CheckCollisionRecs(rect_l, rect_ball) {
+                    ball.vel.x = -ball.vel.x
+                    // SOUND
+                }
+            } else {
+                rect_l := rl.Rectangle {
+                    game.paddle_pos + f32(game.paddle_length / 2) - 8,
+                    paddle_get_y(false),
+                    8,
+                    32,
+                }
+                if rl.CheckCollisionRecs(rect_l, rect_ball) {
+                    ball.vel.x = -ball.vel.x
+                    // SOUND
+                }
+            }
+        }
+
+        ball.pos += ball.vel
+
+        for zone in death_zones {
+            if rl.CheckCollisionRecs(rect_ball, zone) {
+                ball.dead = true
+                ball.dead_timer = 30
+                // SOUND
+            }
+        }
+    }
+
+    // Board frame rendering
+    {
+        tile_bl := sprites[.Tiles_Blue]
+        tile_or := sprites[.Tiles_Orange]
+        src_tl := rl.Rectangle {
+            0,
+            0,
+            TILE_SIZE,
+            TILE_SIZE,
+        }
+        src_tr := rl.Rectangle {
+            0,
+            0,
+            -TILE_SIZE,
+            TILE_SIZE,
+        }
+        src_bl := rl.Rectangle {
+            0,
+            0,
+            TILE_SIZE,
+            -TILE_SIZE,
+        }
+        src_br := rl.Rectangle {
+            0,
+            0,
+            -TILE_SIZE,
+            -TILE_SIZE,
+        }
+
+        // Corners
+        tl := [2]f32 {
+            (RENDER_WIDTH - BOARD_WIDTH*TILE_SIZE) / 2,
+            0,
+        }
+        tr := [2]f32 {
+            tl.x + BOARD_WIDTH*TILE_SIZE,
+            0,
+        }
+        bl := [2]f32 {
+            tl.x,
+            RENDER_HEIGHT - 8,
+        }
+        br := [2]f32 {
+            tr.x,
+            RENDER_HEIGHT - 8,
+        }
+        rl.DrawTextureRec(tile_bl, src_tl, tl - { TILE_SIZE, 0 }, rl.WHITE)
+        rl.DrawTextureRec(tile_bl, src_tr, tr, rl.WHITE)
+        rl.DrawTextureRec(tile_or, src_bl, bl - { TILE_SIZE, 0 }, rl.WHITE)
+        rl.DrawTextureRec(tile_or, src_br, br, rl.WHITE)
+
+
+        src_t := rl.Rectangle {
+            TILE_SIZE,
+            0,
+            TILE_SIZE,
+            TILE_SIZE,
+        }
+        src_b := rl.Rectangle {
+            TILE_SIZE,
+            0,
+            TILE_SIZE,
+            -TILE_SIZE,
+        }
+
+        // Top and bottom
+        for i in 0..<BOARD_WIDTH {
+            rl.DrawTextureRec(tile_bl, src_t, tl + { f32(i*TILE_SIZE), 0, }, rl.WHITE)
+            rl.DrawTextureRec(tile_or, src_b, bl + { f32(i*TILE_SIZE), 0, }, rl.WHITE)
+        }
+
+        src_l := rl.Rectangle {
+            0,
+            TILE_SIZE,
+            TILE_SIZE,
+            TILE_SIZE,
+        }
+        src_r := rl.Rectangle {
+            0,
+            TILE_SIZE,
+            -TILE_SIZE,
+            TILE_SIZE,
+        }
+
+        // Left and right
+        for i in 1..<BOARD_HEIGHT {
+            rl.DrawTextureRec(tile_bl, src_l, tl + { -TILE_SIZE, f32(i*TILE_SIZE), }, rl.WHITE)
+            rl.DrawTextureRec(tile_bl, src_r, tr + {          0, f32(i*TILE_SIZE), }, rl.WHITE)
+            rl.DrawTextureRec(tile_or, src_l, bl + { -TILE_SIZE, -f32(i*TILE_SIZE), }, rl.WHITE)
+            rl.DrawTextureRec(tile_or, src_r, br + {          0, -f32(i*TILE_SIZE), }, rl.WHITE)
+        }
+    }
+
+    // Paddle rendering
+    paddle_y := paddle_get_y(false)
     draw_paddle({ game.paddle_pos, paddle_y      }, int(game.paddle_anim*3), game.paddle_length, false)
     draw_paddle({ game.paddle_pos, paddle_y + 16 }, int(game.paddle_anim*3), game.paddle_length, true)
+
+    // Ball rendering
+    for ball in game.balls {
+        texture: rl.Texture
+        switch ball.color {
+        case .Blue:
+            texture = sprites[.Ball_Blue]
+        case .Orange:
+            texture = sprites[.Ball_Orange]
+        }
+        rl.DrawTextureV(texture, ball.pos, rl.WHITE)
+    }
+
+    rl.DrawRectangleRec(death_zones[0], rl.RED)
+    rl.DrawRectangleRec(death_zones[1], rl.YELLOW)
 }
 
 sprites: [Sprite_Tag]rl.Texture
