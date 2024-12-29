@@ -30,3 +30,14 @@ sprites_load := [Sprite_Tag][]byte {
     .Item_L = #load("sprites/Item_L.png"),
 }
 
+Sound_Tag :: enum {
+    Bounce,
+    Paddle,
+    Score,
+}
+
+sounds_load := [Sound_Tag][]byte {
+    .Bounce = #load("sounds/bounce.wav"),
+    .Paddle = #load("sounds/paddle.wav"),
+    .Score = #load("sounds/score.wav"),
+}

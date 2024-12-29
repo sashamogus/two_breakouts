@@ -10,8 +10,8 @@ import rl "vendor:raylib"
 RENDER_WIDTH  :: 568
 RENDER_HEIGHT :: 320
 
-WINDOW_WIDTH :: RENDER_WIDTH
-WINDOW_HEIGHT :: RENDER_HEIGHT
+WINDOW_WIDTH :: RENDER_WIDTH*2
+WINDOW_HEIGHT :: RENDER_HEIGHT*2
 
 
 CL_ORANGE :: rl.Color { 227, 81, 0, 255 }
@@ -68,6 +68,7 @@ Block :: struct {
 }
 
 Game_State :: enum {
+    Level_Clear,
     Level_Start,
     Playing,
     Gameover,
@@ -84,7 +85,12 @@ Game :: struct {
 
     balls: [dynamic]Ball,
 
-    board: [2][BOARD_HEIGHT][BOARD_WIDTH]Block
+    board: [2][BOARD_HEIGHT][BOARD_WIDTH]Block,
+    blocks_remaining: int,
+
+    lives: int,
+    level: int,
+    score: int,
 }
 
 
@@ -206,13 +212,20 @@ poll_input :: proc(input: ^Input) {
 game_init :: proc(game: ^Game) {
     game^ = {}
     game.state = .Level_Start
+    game.state_timer = 180
+
     game.paddle_pos = RENDER_WIDTH / 2
     game.paddle_anim = 0
     game.paddle_length = PADDLE_SIZE
+
+    game.lives = 3
+    game.level = 0
+    game_load_level(game, levels[game.level])
 }
 
 game_load_level :: proc(game: ^Game, level_strings: Level_Strings) {
     game.board = {}
+    game.blocks_remaining = 0
     for side, s in level_strings {
         for row, i in side {
             for c, j in row {
@@ -225,6 +238,8 @@ game_load_level :: proc(game: ^Game, level_strings: Level_Strings) {
                     }
                     game.board[s][i][j] = b
                     game.board[s][i][j + 1] = b
+
+                    game.blocks_remaining += 1
                 }
             }
         }
@@ -361,7 +376,7 @@ delete_block :: proc(block: Block, board: ^[2][BOARD_HEIGHT][BOARD_WIDTH]Block) 
     }
 }
 
-game_update :: proc(game: ^Game, input: Input) {
+game_update_playing :: proc(game: ^Game, input: Input) {
     game.frame_count += 1
 
     move_speed := f32(1)
@@ -411,15 +426,6 @@ game_update :: proc(game: ^Game, input: Input) {
         }
     }
 
-    if rl.IsKeyPressed(.ENTER) {
-        ball_spawn(&game.balls, false)
-    }
-    if rl.IsKeyPressed(.BACKSPACE) {
-        ball_spawn(&game.balls, true)
-    }
-
-    
-
     #reverse for &ball, i in game.balls {
         if ball.held {
             ball.pos.x = game.paddle_pos - 4
@@ -442,23 +448,23 @@ game_update :: proc(game: ^Game, input: Input) {
         if ball.vel.x < 0 {
             if ball.pos.x < board_l {
                 ball.vel.x = -ball.vel.x
-                // SOUND
+                rl.PlaySound(sounds[.Bounce])
             }
         } else {
             if ball.pos.x > board_r - 8 {
                 ball.vel.x = -ball.vel.x
-                // SOUND
+                rl.PlaySound(sounds[.Bounce])
             }
         }
         if ball.vel.y < 0 {
             if ball.pos.y < 8 {
                 ball.vel.y = -ball.vel.y
-                // SOUND
+                rl.PlaySound(sounds[.Bounce])
             }
         } else {
             if ball.pos.y > RENDER_HEIGHT - 16 {
                 ball.vel.y = -ball.vel.y
-                // SOUND
+                rl.PlaySound(sounds[.Bounce])
             }
         }
 
@@ -487,7 +493,7 @@ game_update :: proc(game: ^Game, input: Input) {
 
                     ball.vel = { math.cos(new_a), math.sin(new_a) } * s
                     ball.vel.y = -ball.vel.y
-                    // SOUND
+                    rl.PlaySound(sounds[.Paddle])
                 }
             } else {
                 rect_or := rl.Rectangle {
@@ -506,7 +512,7 @@ game_update :: proc(game: ^Game, input: Input) {
                     new_a := clamp(math.lerp(min_a, max_a, t), 0.3, math.PI - 0.3)
 
                     ball.vel = { math.cos(new_a), math.sin(new_a) } * s
-                    // SOUND
+                    rl.PlaySound(sounds[.Paddle])
                 }
             }
         } else {
@@ -519,7 +525,7 @@ game_update :: proc(game: ^Game, input: Input) {
                 }
                 if rl.CheckCollisionRecs(rect_l, rect_ball) {
                     ball.vel.x = -ball.vel.x
-                    // SOUND
+                    rl.PlaySound(sounds[.Paddle])
                 }
             } else {
                 rect_l := rl.Rectangle {
@@ -530,7 +536,7 @@ game_update :: proc(game: ^Game, input: Input) {
                 }
                 if rl.CheckCollisionRecs(rect_l, rect_ball) {
                     ball.vel.x = -ball.vel.x
-                    // SOUND
+                    rl.PlaySound(sounds[.Paddle])
                 }
             }
         }
@@ -551,12 +557,17 @@ game_update :: proc(game: ^Game, input: Input) {
                 if bounce_rect(&ball.pos, &ball.vel, rect) {
                     delete_block(block, &game.board)
 
-                    // SOUND
-                    // SCORE
+                    rl.PlaySound(sounds[.Score])
+
+                    game.score += 100
+                    game.blocks_remaining -= 1
+                    if game.blocks_remaining <= 0 {
+                        game.state = .Level_Clear
+                        game.state_timer = 180
+                    }
                 }
             }
         }
-
 
         // Move ball :)
         ball.pos += ball.vel
@@ -570,6 +581,76 @@ game_update :: proc(game: ^Game, input: Input) {
             }
         }
     }
+
+    // Gameover
+    if len(game.balls) == 0 {
+        game.lives -= 1
+        if game.lives <= 0 {
+            game.state = .Gameover
+            game.state_timer = 300
+        } else {
+            game.state = .Level_Start
+            game.state_timer = 300
+        }
+        // SOUND
+    }
+
+    // Paddle rendering
+    paddle_y := paddle_get_y(false)
+    draw_paddle({ game.paddle_pos, paddle_y      }, int(game.paddle_anim*3), game.paddle_length, false)
+    draw_paddle({ game.paddle_pos, paddle_y + 16 }, int(game.paddle_anim*3), game.paddle_length, true)
+
+    // Ball rendering
+    for ball in game.balls {
+        texture: rl.Texture
+        switch ball.color {
+        case .Blue:
+            texture = sprites[.Ball_Blue]
+        case .Orange:
+            texture = sprites[.Ball_Orange]
+        }
+        rl.DrawTextureV(texture, ball.pos, rl.WHITE)
+    }
+
+    // Death zone rendering
+    rl.DrawRectangleRec(death_zones[0], rl.RED)
+    rl.DrawRectangleRec(death_zones[1], rl.YELLOW)
+}
+
+game_update :: proc(game: ^Game, input: Input) {
+    game.frame_count += 1
+
+    switch game.state {
+    case .Level_Start:
+        game.state_timer -= 1
+        if game.state_timer <= 0 {
+            game.state = .Playing
+            clear(&game.balls)
+            ball_spawn(&game.balls, false)
+        }
+    case .Level_Clear:
+        game.state_timer -= 1
+        if game.state_timer <= 0 {
+            game.level += 1
+            if game.level >= len(levels) {
+                game.level = 0
+            }
+            game_load_level(game, levels[game.level])
+            game.state = .Level_Start
+            game.state_timer = 180
+        }
+
+    case .Gameover:
+        game.state_timer -= 1
+        if game.state_timer <= 0 {
+            root_state = .Title
+        }
+    case .Playing:
+        game_update_playing(game, input)
+    }
+
+    board_l := f32((RENDER_WIDTH - BOARD_WIDTH*TILE_SIZE) / 2)
+    board_r := f32(board_l + BOARD_WIDTH*TILE_SIZE)
 
     // Board frame rendering
     {
@@ -678,31 +759,55 @@ game_update :: proc(game: ^Game, input: Input) {
         }
     }
 
-    // Paddle rendering
-    paddle_y := paddle_get_y(false)
-    draw_paddle({ game.paddle_pos, paddle_y      }, int(game.paddle_anim*3), game.paddle_length, false)
-    draw_paddle({ game.paddle_pos, paddle_y + 16 }, int(game.paddle_anim*3), game.paddle_length, true)
-
-    // Ball rendering
-    for ball in game.balls {
-        texture: rl.Texture
-        switch ball.color {
-        case .Blue:
-            texture = sprites[.Ball_Blue]
-        case .Orange:
-            texture = sprites[.Ball_Orange]
-        }
-        rl.DrawTextureV(texture, ball.pos, rl.WHITE)
+    
+    // Texts
+    {
+        x := f32(board_r + 16)
+        y := f32(RENDER_HEIGHT - 48)
+        rl.DrawTextEx(font, fmt.ctprintf("Lives: %d", game.lives), { x, y }, 8, 0, rl.WHITE)
+        y += 8
+        rl.DrawTextEx(font, fmt.ctprintf("Level: %d", game.level + 1), { x, y }, 8, 0, rl.WHITE)
+        y += 8
+        rl.DrawTextEx(font, fmt.ctprintf("Score: %d", game.score), { x, y }, 8, 0, rl.WHITE)
+        y += 8
+        rl.DrawTextEx(font, fmt.ctprintf("Blocks: %d", game.blocks_remaining), { x, y }, 8, 0, rl.WHITE)
+        y += 8
     }
 
-    // Death zone rendering
-    rl.DrawRectangleRec(death_zones[0], rl.RED)
-    rl.DrawRectangleRec(death_zones[1], rl.YELLOW)
-    
+    // State texts
+    #partial switch game.state {
+    case .Level_Start:
+        // Render text
+        text := fmt.ctprintf("Level %d Start", game.level + 1)
+        text_size := rl.MeasureTextEx(font, text, 16, 0)
+        pos := [2]f32 { RENDER_WIDTH, RENDER_HEIGHT } - text_size
+        pos /= 2
+        rl.DrawRectangleRec({ pos.x, pos.y, text_size.x, text_size.y }, rl.BLACK)
+        rl.DrawTextEx(font, text, pos, 16, 0, rl.WHITE)
+    case .Level_Clear:
+        // Render text
+        text := cstring("Level Clear!")
+        text_size := rl.MeasureTextEx(font, text, 16, 0)
+        pos := [2]f32 { RENDER_WIDTH, RENDER_HEIGHT } - text_size
+        pos /= 2
+        rl.DrawRectangleRec({ pos.x, pos.y, text_size.x, text_size.y }, rl.BLACK)
+        rl.DrawTextEx(font, text, pos, 16, 0, rl.WHITE)
+    case .Gameover:
+        // Render text
+        text := cstring("Gameover")
+        text_size := rl.MeasureTextEx(font, text, 16, 0)
+        pos := [2]f32 { RENDER_WIDTH, RENDER_HEIGHT } - text_size
+        pos /= 2
+        rl.DrawRectangleRec({ pos.x, pos.y, text_size.x, text_size.y }, rl.BLACK)
+        rl.DrawTextEx(font, text, pos, 16, 0, rl.WHITE)
+    }
 }
 
 font: rl.Font
 sprites: [Sprite_Tag]rl.Texture
+sounds: [Sound_Tag]rl.Sound
+
+root_state: Root_State
 
 main :: proc() {
     rl.SetConfigFlags({ .WINDOW_RESIZABLE, .FULLSCREEN_MODE, .WINDOW_MAXIMIZED })
@@ -729,14 +834,19 @@ main :: proc() {
         rl.UnloadImage(image)
     }
 
+    // Load sounds
+    rl.InitAudioDevice()
+    for tag in Sound_Tag {
+        wave := rl.LoadWaveFromMemory(".wav", &sounds_load[tag][0], i32(len(sounds_load[tag])))
+        sounds[tag] = rl.LoadSoundFromWave(wave)
+    }
 
-    root_state := Root_State.Game
+    root_state = .Title
 
     input: Input
     game: Game
 
     game_init(&game)
-    game_load_level(&game, levels[0])
 
     for !rl.WindowShouldClose() {
         // Handle Alt + Enter
@@ -786,6 +896,25 @@ main :: proc() {
 
         switch root_state {
         case .Title:
+            // Render text
+            text := cstring("Press any key to start")
+            text_size := rl.MeasureTextEx(font, text, 16, 0)
+            pos := [2]f32 { RENDER_WIDTH, RENDER_HEIGHT } - text_size
+            pos /= 2
+            rl.DrawRectangleRec({ pos.x, pos.y, text_size.x, text_size.y }, rl.BLACK)
+            rl.DrawTextEx(font, text, pos, 16, 0, rl.WHITE)
+
+            pressed: bool
+            if rl.GetKeyPressed() != .KEY_NULL {
+                pressed = true
+            }
+            if rl.GetGamepadButtonPressed() != .UNKNOWN {
+                pressed = true
+            }
+            if pressed {
+                game_init(&game)
+                root_state = .Game
+            }
         case .Game:
             game_update(&game, input)
         }
